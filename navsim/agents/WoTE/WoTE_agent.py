@@ -69,12 +69,12 @@ class WoTEAgent(AbstractAgent):
 
     def initialize(self) -> None:
         """Inherited, see superclass."""
-        if torch.cuda.is_available():
-            state_dict: Dict[str, Any] = torch.load(self._checkpoint_path)["state_dict"]
-        else:
-            state_dict: Dict[str, Any] = torch.load(
-                self._checkpoint_path, map_location=torch.device("cpu")
-            )["state_dict"]
+        # 先在 CPU 加载检查点，再由调用方将模型移到目标设备，避免依赖 CUDA。
+        # PyTorch 2.6 起默认仅加载权重；原 Lightning 检查点包含其他对象，
+        # 因此显式关闭该限制。这里只应加载可信的检查点。
+        state_dict: Dict[str, Any] = torch.load(
+            self._checkpoint_path, map_location="cpu", weights_only=False
+        )["state_dict"]
         
         if "agent.WoTE_model.trajectory_anchors" in state_dict:
             del state_dict["agent.WoTE_model.trajectory_anchors"]
@@ -84,6 +84,19 @@ class WoTEAgent(AbstractAgent):
     def get_sensor_config(self) -> SensorConfig:
         """Inherited, see superclass."""
         return SensorConfig.build_tfu_sensors(self.slice_indices) 
+
+    def compute_trajectory_with_results(self, agent_input: AgentInput):
+        """Return the selected trajectory and the complete single-scene model output."""
+        self.eval()
+        features = {}
+        for builder in self.get_feature_builders():
+            features.update(builder.compute_features(agent_input))
+        device = next(self.parameters()).device
+        features = {key: value.unsqueeze(0).to(device) for key, value in features.items()}
+        with torch.no_grad():
+            results = self.forward(features)
+        arrays = {key: value.detach().cpu().numpy() for key, value in results.items()}
+        return Trajectory(arrays["trajectory"].squeeze(0)), arrays
 
     def get_target_builders(self) -> List[AbstractTargetBuilder]:
         return [
