@@ -116,7 +116,22 @@ def main(cfg: DictConfig) -> None:
     logger.info("Num validation samples: %d", len(val_data))
 
     logger.info("Building Trainer")
-    trainer_params = cfg.trainer.params
+    # 复制 Hydra 配置，便于仅在 NPU 分支替换为 Lightning 所需的 Python 对象。
+    trainer_params = dict(cfg.trainer.params)
+    if trainer_params.get("accelerator") == "npu":
+        from navsim.planning.training.npu_accelerator import NPUAccelerator
+        from pytorch_lightning.strategies import SingleDeviceStrategy
+
+        # 当前只验证过单卡 FP32；明确拒绝未经验证的混合精度和多卡策略。
+        if trainer_params.get("precision") not in (32, "32", "32-true"):
+            raise ValueError("NPU training currently supports only 32-true precision")
+        if trainer_params.get("strategy", "auto") not in ("auto",):
+            raise ValueError("NPU training currently supports only the single-device strategy")
+        # 此运行时的 Transformer 融合推理路径会回退到 CPU；关闭以便验证阶段使用 NPU 算子。
+        torch.backends.mha.set_fastpath_enabled(False)
+        trainer_params["accelerator"] = NPUAccelerator()
+        # Lightning 对自定义加速器可能默认选择 CPU；显式绑定第一个可见 NPU。
+        trainer_params["strategy"] = SingleDeviceStrategy(device=torch.device("npu:0"))
     # trainer_params['strategy'] = "ddp_find_unused_parameters_true" #TODO
     trainer = pl.Trainer(
                 **trainer_params, 

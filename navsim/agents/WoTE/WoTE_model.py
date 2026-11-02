@@ -66,8 +66,9 @@ class WoTEModel(nn.Module):
 
         # Load offline trajectories and MLP for planning vb feature
         cluster_file = config.cluster_file_path
+        # 锚点文件可能是 float64，而 CANN 的向量范数算子不支持该类型；统一转为 float32。
         self.trajectory_anchors = torch.nn.Parameter(
-            torch.tensor(np.load(cluster_file)),
+            torch.tensor(np.load(cluster_file), dtype=torch.float32),
             requires_grad=False
         )
 

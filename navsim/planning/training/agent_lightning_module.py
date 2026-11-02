@@ -36,7 +36,7 @@ class AgentLightningModule(pl.LightningModule):
                 continue
             total_loss = total_loss + loss_value
         return total_loss
-    
+
     def training_step(
         self,
         batch: Tuple[Dict[str, Tensor], Dict[str, Tensor]],
@@ -53,8 +53,5 @@ class AgentLightningModule(pl.LightningModule):
 
     def configure_optimizers(self):
         return self.agent.get_optimizers()
-    
-    def backward(self, loss):
-        # print('set detect anomaly')
-        # torch.autograd.set_detect_anomaly(True)
-        loss.backward()
+
+    # 不再重写 backward：Lightning 新版会传入额外参数，使用框架默认实现可兼容训练调用。

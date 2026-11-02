@@ -73,7 +73,8 @@ class WoTETargetBuilder(AbstractTargetBuilder):
             num_trajectory_frames=self._trajectory_sampling.num_poses, 
             frame_offset=frame_offset,
         )
-        future_trajectory = torch.tensor(future_trajectory.poses)
+        # 轨迹标签与 float32 锚点保持一致，避免损失计算被提升为 NPU 不支持的 float64。
+        future_trajectory = torch.tensor(future_trajectory.poses, dtype=torch.float32)
         future_trajectory_list.append(future_trajectory)
         
         # obtain sim scores
