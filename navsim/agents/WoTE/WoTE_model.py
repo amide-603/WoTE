@@ -681,6 +681,8 @@ class WoTEModel(nn.Module):
             "all_trajectory": trajectory_anchors,
             "final_rewards": final_rewards,
             "im_rewards": im_rewards_softmax,
+            # 返回已用于排序的五项预测奖励，顺序为 NC、DAC、EP、TTC、Comfort。
+            "sim_rewards": torch.cat(sim_rewards, dim=-1).permute(0, 2, 1),
             }
         return results
 
