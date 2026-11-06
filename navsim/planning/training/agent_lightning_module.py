@@ -35,6 +35,7 @@ class AgentLightningModule(pl.LightningModule):
             if 'acc' in loss_key:
                 continue
             total_loss = total_loss + loss_value
+        self.log(f"{logging_prefix}/total_loss", total_loss, on_step=False, on_epoch=True, sync_dist=True)
         return total_loss
 
     def training_step(
