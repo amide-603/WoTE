@@ -18,6 +18,8 @@ split: trainval
 cache_path: '' #no cache
 use_cache_without_dataset: false # load the training samples from the cache. scene-filter will be ignored
 force_cache_computation: false
+resume_from_checkpoint: null # Optional Lightning checkpoint, including optimizer/scheduler state
+checkpoint_every_n_epochs: null # Optional snapshots for per-checkpoint evaluation
 
 dataloader:
   params:

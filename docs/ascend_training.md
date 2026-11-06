@@ -1,8 +1,9 @@
 # WoTE 昇腾训练说明
 
-训练入口通过 `torch_npu` 和 PyTorch Lightning 接入单卡昇腾 NPU。已测试的环境为
+训练入口通过 `torch_npu` 和 PyTorch Lightning 接入昇腾 NPU。已测试的环境为
 CANN 8.5.2、PyTorch 2.7.1、torch_npu 2.7.1.post2 和 Lightning 2.2.1；本机
-`npu-smi` 将设备识别为 Ascend910。目前仅支持已验证的单卡 FP32 训练，多卡和混合精度尚未验证。
+`npu-smi` 将设备识别为 Ascend910。已验证单卡和单机双卡 FP32 训练，以及单卡和双卡推理；
+更多卡数和混合精度尚未验证。
 
 在本机选择物理设备并激活现有环境：
 
@@ -41,3 +42,37 @@ python navsim/planning/script/run_training.py \
 并非训练完成的模型。Hydra 和 Lightning 将测试结果保存到指定的 `output_dir`。本机普通
 `trainval` 划分中有些日志缺少传感器文件，选择其他样本时应使用 NAVTRAIN 场景 token，
 或先核对传感器文件是否齐全。
+
+## 单机多卡训练
+
+先用 `npu-smi info` 确认设备空闲。在启动进程前设置可见物理设备，例如
+`export ASCEND_RT_VISIBLE_DEVICES=2,3`；进程内映射为 `npu:0` 和 `npu:1`。
+在训练命令中设置：
+
+```bash
+trainer.params.accelerator=npu trainer.params.strategy=ddp \
+trainer.params.precision=32-true +trainer.params.devices=2
+```
+
+训练采用每卡一个进程的 HCCL DDP；`dataloader.params.batch_size` 是**每卡**批大小，
+全局批大小为每卡批大小乘设备数，再乘梯度累积步数。改变全局批大小可能改变训练效果，
+不应将速度提升直接视作同等训练配置。多卡验证使用 Lightning 的分布式采样，验证集大小不能
+被卡数整除时可能重复少量样本；最终场景评分应使用下方推理流程。
+
+要恢复包含优化器、学习率调度器和轮次的 Lightning 检查点，可在训练命令中追加
+`resume_from_checkpoint='"/绝对路径/epoch=0-step=1274.ckpt"'`。`trainer.params.max_epochs`
+是训练总轮数，不是恢复后新增的轮数。恢复时应保持模型和优化器配置兼容，并使用新的输出目录
+保存新运行；检查点只保存到最近一次完成的保存点。
+
+## 单机多卡推理与 PDMS
+
+同样先设置 `ASCEND_RT_VISIBLE_DEVICES`，然后在 `run_pdm_score.py` 的常规参数中追加：
+
+```bash
+'inference_devices=["npu:0","npu:1"]'
+```
+
+每张卡独立处理不重叠的场景，主进程核验场景完整性后合并 CSV；各场景的模型输出仍保存到
+`output_dir/model_results`。此参数不能与单卡参数 `+single_eval=true` 或
+`+inference_device=npu:0` 同时使用。子进程各自加载模型和场景，因此实际加速取决于场景数量、
+数据读取和 CPU 评分耗时。
