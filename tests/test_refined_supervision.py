@@ -116,7 +116,10 @@ class RefinedSupervisionTest(unittest.TestCase):
         # 用可控评分替身验证每个样本的候选、token 和五个指标的排列。
         import navsim.agents.WoTE.refined_supervision as supervision
         from unittest.mock import patch
-        helper = RefinedSupervision(WoTEConfig(), [3])
+        # 该测试独立验证串行标签包装，避免依赖实际 CPU 子进程。
+        config = WoTEConfig()
+        config.score_workers = 0
+        helper = RefinedSupervision(config, [3])
         helper._metric_loader = Mock()
         helper._metric_loader.metric_cache_paths = {"a": "a", "b": "b"}
         helper._metric_loader.get_from_token.side_effect = lambda token: token
