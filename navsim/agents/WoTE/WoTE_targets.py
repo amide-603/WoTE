@@ -85,6 +85,12 @@ class WoTETargetBuilder(AbstractTargetBuilder):
             combined_sim_reward = np.vstack([sim_reward_dict_single[key] for key in self.sim_keys])
             combined_sim_reward_tensor = torch.tensor(combined_sim_reward, dtype=torch.float32)
             sim_reward_list.append(combined_sim_reward_tensor)
+            if self._config.ranking_loss_weight > 0:
+                # These are precomputed scores for fixed anchors, not the offset
+                # trajectories produced by the current model.
+                result['ranking_target_score'] = torch.as_tensor(
+                    sim_reward_dict_single['score'], dtype=torch.float32
+                ).reshape(-1)
 
         future_trajectory_stacked = torch.stack(future_trajectory_list)
         result['trajectory'] = future_trajectory_stacked
