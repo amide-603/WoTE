@@ -81,6 +81,15 @@ class CacheOnlyDataset(torch.utils.data.Dataset):
                     found_caches.append(data_dict_path.is_file())
                 if all(found_caches):
                     valid_cache_paths[token_path.name] = token_path
+                # 旧 WoTE 目标无法恢复自车框下的背景，缓存模式必须提示重建。
+                elif (token_path / "WoTE_target.gz").is_file() and any(
+                    builder.get_unique_name() == "WoTE_target_refined_v1"
+                    for builder in target_builders
+                ) and not (token_path / "WoTE_target_refined_v1.gz").is_file():
+                    raise RuntimeError(
+                        f"场景 {token_path.name} 仍使用旧 WoTE 目标缓存，请重建 "
+                        "WoTE_target_refined_v1；已有特征缓存可复用。"
+                    )
 
         return valid_cache_paths
 
@@ -102,6 +111,8 @@ class CacheOnlyDataset(torch.utils.data.Dataset):
             data_dict = load_feature_target_from_pickle(data_dict_path)
             targets.update(data_dict)
 
+        # 在线评分需要从缓存目录恢复场景 token，无需重建传感器特征。
+        targets["scene_token"] = token
         return (features, targets)
 
 
@@ -114,6 +125,8 @@ class Dataset(torch.utils.data.Dataset):
         cache_path: Optional[str] = None,
         force_cache_computation: bool = False,
         use_fut_frames: bool = False,
+        # 仅显式缓存构建入口允许迁移旧目标，训练启动时避免隐式全量重建。
+        allow_target_cache_rebuild: bool = False,
     ):
         super().__init__()
         self._scene_loader = scene_loader
@@ -123,7 +136,9 @@ class Dataset(torch.utils.data.Dataset):
         self._cache_path: Optional[Path] = Path(cache_path) if cache_path else None
         self._force_cache_computation = force_cache_computation
         self._valid_cache_paths: Dict[str, Path] = self._load_valid_caches(
-            self._cache_path, feature_builders, target_builders
+            self._cache_path, feature_builders, target_builders,
+            allow_target_cache_rebuild=allow_target_cache_rebuild,
+            scene_tokens=set(scene_loader.tokens),
         )
 
         if self._cache_path is not None:
@@ -136,6 +151,8 @@ class Dataset(torch.utils.data.Dataset):
         cache_path: Optional[Path],
         feature_builders: List[AbstractFeatureBuilder],
         target_builders: List[AbstractTargetBuilder],
+        allow_target_cache_rebuild: bool = False,
+        scene_tokens=None,
     ) -> Dict[str, Path]:
 
         valid_cache_paths: Dict[str, Path] = {}
@@ -149,6 +166,16 @@ class Dataset(torch.utils.data.Dataset):
                         found_caches.append(data_dict_path.is_file())
                     if all(found_caches):
                         valid_cache_paths[token_path.name] = token_path
+                    # 训练使用旧缓存时立即报错，防止启动时偷偷重建全部目标。
+                    elif (not allow_target_cache_rebuild
+                          and (scene_tokens is None or token_path.name in scene_tokens)
+                          and (token_path / "WoTE_target.gz").is_file()
+                          and any(builder.get_unique_name() == "WoTE_target_refined_v1" for builder in target_builders)
+                          and not (token_path / "WoTE_target_refined_v1.gz").is_file()):
+                        raise RuntimeError(
+                            f"场景 {token_path.name} 仍使用旧 WoTE 目标缓存，请先运行 "
+                            "run_dataset_caching.py 重建 WoTE_target_refined_v1；已有特征缓存可复用。"
+                        )
 
         return valid_cache_paths
 
@@ -163,13 +190,16 @@ class Dataset(torch.utils.data.Dataset):
 
         for builder in self._feature_builders:
             data_dict_path = token_path / (builder.get_unique_name() + ".gz")
-            data_dict = builder.compute_features(agent_input)
-            dump_feature_target_to_pickle(data_dict_path, data_dict)
+            # 新目标缓存缺失时复用已有特征，避免重复计算传感器数据。
+            if self._force_cache_computation or not data_dict_path.is_file():
+                data_dict = builder.compute_features(agent_input)
+                dump_feature_target_to_pickle(data_dict_path, data_dict)
 
         for builder in self._target_builders:
             data_dict_path = token_path / (builder.get_unique_name() + ".gz")
-            data_dict = builder.compute_targets(scene)
-            dump_feature_target_to_pickle(data_dict_path, data_dict)
+            if self._force_cache_computation or not data_dict_path.is_file():
+                data_dict = builder.compute_targets(scene)
+                dump_feature_target_to_pickle(data_dict_path, data_dict)
 
         self._valid_cache_paths[token] = token_path
 
@@ -191,6 +221,8 @@ class Dataset(torch.utils.data.Dataset):
             data_dict = load_feature_target_from_pickle(data_dict_path)
             targets.update(data_dict)
 
+        # 在线评分需要将当前样本与 metric cache 对齐。
+        targets["scene_token"] = token
         return (features, targets)
 
     def cache_dataset(self) -> None:
@@ -237,4 +269,6 @@ class Dataset(torch.utils.data.Dataset):
             for builder in self._target_builders:
                 targets.update(builder.compute_targets(scene))
 
+        # 无缓存和缓存模式使用同一 token 接口。
+        targets["scene_token"] = token
         return (features, targets)

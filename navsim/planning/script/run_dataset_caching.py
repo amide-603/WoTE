@@ -51,6 +51,8 @@ def cache_features(args: List[Dict[str, Union[List[str], DictConfig]]]) -> List[
         target_builders=agent.get_target_builders(),
         cache_path=cfg.cache_path,
         force_cache_computation=cfg.force_cache_computation,
+        # 显式执行缓存脚本时允许生成新版目标，并沿用已有特征缓存。
+        allow_target_cache_rebuild=True,
     )
     return []
 

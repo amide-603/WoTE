@@ -16,8 +16,17 @@ cd /home/gaoxuan_gac/code/WoTE
 运行 `navsim/planning/script/run_training.py` 时使用 `trainer.params.accelerator=npu`、
 `trainer.params.strategy=auto`、`trainer.params.precision=32-true` 和
 `+trainer.params.devices=1`。`ASCEND_RT_VISIBLE_DEVICES` 选择的物理设备在进程内映射为
-`npu:0`。训练还需要 NAVTRAIN 传感器文件，以及 `WoTEConfig` 中配置的轨迹锚点和预计算仿真奖励。
-损失函数中的 SciPy 匈牙利匹配在 CPU 上运行。
+`npu:0`。训练还需要 NAVTRAIN 传感器文件、`WoTEConfig` 中配置的 256 条轨迹锚点，以及覆盖训练和验证
+场景的 metric cache。每次前向在 CPU 上对当前 refine 轨迹按 4 秒、40 步在线计算 PDM 五项标签，
+不再读取预计算锚点分数；在线仿真会增加训练耗时。训练前将环境变量
+`WOTE_METRIC_CACHE_PATH` 设置为包含 `metadata` 的 metric cache 根目录，或配置
+`agent.config.metric_cache_path`。缺少场景缓存时训练会报错。损失函数中的 SciPy 匈牙利匹配也在
+CPU 上运行。
+
+未来 BEV 标签使用 `WoTE_target_refined_v1` 缓存中的无自车框背景，在训练时按采样的 refine
+轨迹动态绘制自车框。旧 `WoTE_target.gz` 不能用作新标签；使用缓存时需重新生成目标缓存。
+非强制重建模式下，已有的传感器特征缓存会复用。缓存模式发现旧目标时会提示重建。
+下方测试命令同样要求指定的训练和验证场景均有对应 metric cache。
 
 使用真实 NAVTRAIN 样本进行有范围限制的小规模测试：
 

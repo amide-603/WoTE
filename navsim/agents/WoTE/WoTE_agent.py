@@ -18,6 +18,8 @@ from navsim.common.dataclasses import Scene
 import timm, cv2
 from navsim.agents.WoTE.WoTE_model import WoTEModel
 from navsim.agents.WoTE.WoTE_loss import compute_wote_loss
+# 在线监督使用当前前向产生的 refine 轨迹，而非离线锚点分数。
+from navsim.agents.WoTE.refined_supervision import RefinedSupervision
 from navsim.agents.WoTE.WoTE_targets import WoTETargetBuilder
 from navsim.agents.WoTE.WoTE_features import WoTEFeatureBuilder
 from navsim.common.dataclasses import AgentInput, Trajectory, SensorConfig
@@ -58,6 +60,8 @@ class WoTEAgent(AbstractAgent):
         self.slice_indices = slice_indices
         self.is_eval = False
         self.config = config
+        # 延迟初始化评分器，避免推理时加载训练用 metric cache。
+        self._refined_supervision = RefinedSupervision(config, self.slice_indices)
 
         if resume_from_checkpoint:
             self.initialize()
@@ -123,6 +127,14 @@ class WoTEAgent(AbstractAgent):
         targets: Dict[str, torch.Tensor],
         predictions: Dict[str, torch.Tensor],
     ) -> torch.Tensor:
+        # 评分和绘制标签只读取 detach 轨迹；模型预测分支的梯度仍保留。
+        refined = predictions["refined_trajectories"]
+        targets = dict(targets)
+        if "scene_token" not in targets:
+            raise RuntimeError("训练样本缺少 scene_token，无法定位在线评分所需的 metric cache。")
+        targets["sim_reward"] = self._refined_supervision.score(refined, targets["scene_token"])
+        if self.config.use_map_loss:
+            targets["fut_bev_semantic_map"] = self._refined_supervision.future_bev_target(targets, refined)
         return compute_wote_loss(targets, predictions, self.config)
 
     def get_optimizers(self) -> Union[Optimizer, Dict[str, Union[Optimizer, LRScheduler]]]:

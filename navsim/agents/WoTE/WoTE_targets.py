@@ -44,9 +44,7 @@ class WoTETargetBuilder(AbstractTargetBuilder):
         self.slice_indices = slice_indices
 
         self.sim_reward_dict_path = sim_reward_dict_path
-        if self.sim_reward_dict_path is not None:
-            self.sim_reward_dict = np.load(self.sim_reward_dict_path, allow_pickle=True).item() 
-            self.sim_keys = ['no_at_fault_collisions', 'drivable_area_compliance', 'ego_progress', 'time_to_collision_within_bound', 'comfort']
+        # 固定锚点的离线分数不再作为训练标签，评分在模型生成 refine 后在线完成。
         
         self.future_idx = config.future_idx if hasattr(config, 'future_idx') else 11
         cluster_file = self._config.cluster_file_path
@@ -58,12 +56,12 @@ class WoTETargetBuilder(AbstractTargetBuilder):
         
 
     def get_unique_name(self) -> str:
-        return "WoTE_target"
+        # 使用独立缓存名，避免将含旧锚点自车框的标签误当作背景图。
+        return "WoTE_target_refined_v1"
 
     def compute_targets(self, scene: Scene) -> Dict[str, torch.Tensor]:
         result = {}
         future_trajectory_list = [] 
-        sim_reward_list = []
 
         # compute trajectory
         assert len(self.slice_indices) == 1, "Slice indices must be of length 1"
@@ -77,21 +75,8 @@ class WoTETargetBuilder(AbstractTargetBuilder):
         future_trajectory = torch.tensor(future_trajectory.poses, dtype=torch.float32)
         future_trajectory_list.append(future_trajectory)
         
-        # obtain sim scores
-        if self.sim_reward_dict_path is not None:
-            token = scene.frames[index].token
-            sim_reward_dict_single = self.sim_reward_dict[token]['trajectory_scores'][0]
-            # dict_keys(['no_at_fault_collisions', 'drivable_area_compliance', 'driving_direction_compliance', 'ego_progress', 'time_to_collision_within_bound', 'comfort', 'score'])
-            combined_sim_reward = np.vstack([sim_reward_dict_single[key] for key in self.sim_keys])
-            combined_sim_reward_tensor = torch.tensor(combined_sim_reward, dtype=torch.float32)
-            sim_reward_list.append(combined_sim_reward_tensor)
-
-        future_trajectory_stacked = torch.stack(future_trajectory_list)
-        result['trajectory'] = future_trajectory_stacked
-
-        if self.sim_reward_dict_path is not None:
-            sim_reward_stacked = torch.stack(sim_reward_list) 
-            result['sim_reward'] = sim_reward_stacked
+        # 只缓存真实轨迹；PDM 分数依赖当前模型生成的 refine 轨迹。
+        result['trajectory'] = torch.stack(future_trajectory_list)
 
         # agent targets
         use_agent_loss = self._config.use_agent_loss if hasattr(self._config, "use_agent_loss") else True
@@ -135,22 +120,15 @@ class WoTETargetBuilder(AbstractTargetBuilder):
         result["fut_agent_labels"] = fut_agent_labels
 
         # for map targets
-        ego_pose = StateSE2(*scene.frames[cur_map_index].ego_status.ego_pose)
+        # 当前帧索引独立于地图损失开关，供未来背景构建使用。
+        ego_pose = StateSE2(*scene.frames[self.slice_indices[0]].ego_status.ego_pose)
         fut_bev_semantic_map = self._compute_bev_semantic_map(fut_anno_in_cur_frame, scene.map_api, ego_pose)
 
-        ## for maps with multiple ego boxes
-        fut_bev_semantic_map_list = []
-        random_sample_idx = self.rng.choice(self.trajectory_anchors_all.shape[0], self.num_sampled_trajs, replace=False)
-        sampled_trajectory_anchors = self.trajectory_anchors_all[random_sample_idx]
-        result["sampled_trajs_index"] = random_sample_idx
-
-        for trajectory_anchors in sampled_trajectory_anchors:
-            ref_frame_offset = trajectory_anchors[frame_interval]
-            fut_in_cur_frame_ego_box = [ref_frame_offset[0], ref_frame_offset[1], 0., 4.0, 2.0, 1.8, ref_frame_offset[2]]
-            fut_bev_semantic_map_cur = self._add_ego_box_to_bev_map(fut_bev_semantic_map.clone(), fut_in_cur_frame_ego_box)
-            fut_bev_semantic_map_list.append(fut_bev_semantic_map_cur)
-            
-        result["fut_bev_semantic_map"] = torch.stack(fut_bev_semantic_map_list)
+        # 保存未被自车框覆盖的背景，训练时再根据当前 refine 位姿绘制标签。
+        result["fut_bev_background"] = fut_bev_semantic_map
+        result["sampled_trajs_index"] = self.rng.choice(
+            self.trajectory_anchors_all.shape[0], self.num_sampled_trajs, replace=False
+        )
 
         return result
     

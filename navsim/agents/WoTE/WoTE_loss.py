@@ -31,7 +31,8 @@ def compute_wote_loss(
     # im & sim rewards
     trajectory_anchors = predictions["trajectory_anchors"]
     imitation_rewards = predictions["im_rewards"]
-    im_reward_loss = compute_im_reward_loss(targets, imitation_rewards, trajectory_anchors)
+    # 评分网络接收 refine 轨迹，模仿标签也依据相同轨迹计算并断开标签梯度。
+    im_reward_loss = compute_im_reward_loss(targets, imitation_rewards, predictions["refined_trajectories"].detach())
 
     sim_rewards = predictions["sim_rewards"]
     sim_reward_loss = compute_sim_reward_loss(targets, sim_rewards)
@@ -63,6 +64,7 @@ def compute_wote_loss(
         loss_dict['map_loss'] = map_loss * config.bev_semantic_weight
 
         # fut map
+        # 动态标签使用与未来特征相同的采样索引和 refine 位姿。
         bz, num_trajs, h, w = targets["fut_bev_semantic_map"].shape
         gt_fut_bev_semantic_map = targets["fut_bev_semantic_map"].reshape(bz * num_trajs, h, w)
         focal_loss_fn = FocalLoss(alpha=focal_loss_alpha, gamma=focal_loss_gamma)
@@ -151,8 +153,10 @@ def compute_im_reward_loss(
     target_trajectory = target_trajectory.reshape(Bz, -1).unsqueeze(1).float()
 
     # Calculate L2 distance between each of the 256 predefined trajectories and the target trajectory
-    num_trajs = trajectory_anchors.shape[0]
-    trajectory_anchors = trajectory_anchors.reshape(num_trajs, -1).unsqueeze(0).repeat(Bz, 1, 1).to(target_trajectory.device)
+    # 同时支持共享锚点与每个样本各自的 refine 轨迹。
+    if trajectory_anchors.ndim == 3:
+        trajectory_anchors = trajectory_anchors.unsqueeze(0).expand(Bz, -1, -1, -1)
+    trajectory_anchors = trajectory_anchors.reshape(Bz, trajectory_anchors.shape[1], -1).to(target_trajectory.device)
     l2_distances = torch.cdist(trajectory_anchors, target_trajectory, p=2)  # Shape: [batch_size, 256]
     l2_distances = l2_distances.squeeze(-1)
 

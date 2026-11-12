@@ -262,14 +262,12 @@ class WoTEModel(nn.Module):
             bev_semantic_map, upsampled_bev_feature = self._process_map(flatten_bev_feature, batch_size)
             results["bev_semantic_map"] = bev_semantic_map
 
-        if self.is_eval:
-            trajectory_offset = offset_dict["trajectory_offset"]
-            trajectory_offset_rewards = offset_dict["trajectory_offset_rewards"]
-            offseted_trajectory_anchors = init_trajectory_anchor + trajectory_offset
-            ego_feat_for_reward_network, _ = self.encode_traj_into_ego_feat(ego_status_feat, offseted_trajectory_anchors, batch_size)
-        else: 
-            # training
-            ego_feat_for_reward_network = ego_feat_fixed_anchor_WoTE
+        # 训练和推理统一编码当前 refine 轨迹，并保留预测分支到 offset 的梯度。
+        refined_trajectories = init_trajectory_anchor + offset_dict["trajectory_offset"]
+        ego_feat_for_reward_network, _ = self.encode_traj_into_ego_feat(
+            ego_status_feat, refined_trajectories, batch_size
+        )
+        results["refined_trajectories"] = refined_trajectories
 
         # Return intermediate results for subsequent stages
         trajectory_outputs = {
@@ -321,6 +319,8 @@ class WoTEModel(nn.Module):
                 fut_flatten_bev_feature_multi_trajs,
                 fut_ego_feat,
                 num_traj,
+                # 未来位置按每个样本的 refine 轨迹注入，而不是共享固定锚点。
+                refined_trajectories=results["refined_trajectories"],
                 fut_idx=(i + 1) * interval
             )
             ego_feat_list.append(fut_ego_feat)
@@ -429,7 +429,7 @@ class WoTEModel(nn.Module):
         scene_bev_feature = scene_bev_feature.permute(0, 1, 3, 2)  # [batch_size, num_traj, H*W, C]
         return scene_bev_feature
     
-    def _inject_fut_ego_into_bev(self, scene_bev_feature: torch.Tensor, ego_feat: torch.Tensor, num_traj: int, fut_idx = 8, h = 8, w = 8) -> torch.Tensor:
+    def _inject_fut_ego_into_bev(self, scene_bev_feature: torch.Tensor, ego_feat: torch.Tensor, num_traj: int, refined_trajectories: torch.Tensor, fut_idx = 8, h = 8, w = 8) -> torch.Tensor:
         """
         Inject the ego feature into the BEV map.
         """
@@ -438,7 +438,8 @@ class WoTEModel(nn.Module):
         ego_feat = ego_feat.squeeze(2).reshape(bz*num_traj, -1)  # [batch_size*num_traj, C]
          # [batch_size*num_traj, 2]
         # coors = torch.zeros(bz*num_traj, 2).to(ego_feat.device)
-        coors = self.trajectory_anchors[:, fut_idx-1, :2].to(ego_feat.device).unsqueeze(0).repeat(bz, 1, 1).reshape(bz*num_traj, -1)
+        # 双线性注入保留位置梯度，使未来 BEV 损失能够更新 offset。
+        coors = refined_trajectories[:, :, fut_idx - 1, :2].reshape(bz * num_traj, 2)
 
         scene_bev_feature = self.inject_ego_feat_to_bev_map(scene_bev_feature, ego_feat, coors)
         scene_bev_feature = scene_bev_feature.view(bz*num_traj, -1, h * w)  # [batch_size, num_traj, C, H*W]
@@ -705,8 +706,8 @@ class WoTEModel(nn.Module):
         sim_rewards = torch.cat(sim_rewards, dim=-1).permute(0, 2, 1).sigmoid()  # Concatenate metric rewards
         result["sim_rewards"] = sim_rewards
 
-        if self.use_agent_loss:
-            result.update(encoder_results)
+        # 即使关闭 agent 损失，也必须返回轨迹和未来 BEV 的训练结果。
+        result.update(encoder_results)
 
         return result
 

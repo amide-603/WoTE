@@ -144,6 +144,9 @@ def cache_data(cfg: DictConfig, worker: WorkerPool) -> None:
         }
         for log_file, tokens_list in scene_loader.get_tokens_list_per_log().items()
     ]
+    # 初次筛选已确定各日志的 token；避免把全量 navtrain 列表复制到每个缓存进程。
+    # 各工作进程会使用 data_points 中的精确 token 重新筛选，不改变缓存范围。
+    cfg.scene_filter.tokens = []
     logger.info("Starting metric caching of %s files...", str(len(data_points)))
 
     cache_results = worker_map(worker, cache_scenarios, data_points)

@@ -123,7 +123,10 @@ class WoTEConfig:
     num_traj_anchor: int = 256
     
     use_sim_reward: bool = True
-    sim_reward_dict_path: str = f'/mnt/sfs_turbo/gaoxuan_gac/WoTE/extra_data/planning_vb/formatted_pdm_score_{num_traj_anchor}.npy'
+    # 在线评分从此路径读取训练场景的 metric cache；也可设置 WOTE_METRIC_CACHE_PATH。
+    metric_cache_path: str = ""
+    # 保留旧配置字段以兼容已有配置，但不再读取预计算锚点分数。
+    sim_reward_dict_path: str = ""
     cluster_file_path = f'/mnt/sfs_turbo/gaoxuan_gac/WoTE/extra_data/planning_vb/trajectory_anchors_{num_traj_anchor}.npy'
     num_plan_queries: int = 32
 
