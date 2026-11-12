@@ -13,7 +13,7 @@ class WoTEConfig:
         time_horizon=4, interval_length=0.5
     )
 
-    resnet34_path = '/home/yingyan.li/repo/WoTE/ckpts/resnet34.pth'
+    resnet34_path = '/mnt/sfs_turbo/gaoxuan_gac/WoTE/ckpts/resnet34.pth'
     image_architecture: str = "resnet34"
     lidar_architecture: str = "resnet34"
 
@@ -123,8 +123,8 @@ class WoTEConfig:
     num_traj_anchor: int = 256
     
     use_sim_reward: bool = True
-    sim_reward_dict_path: str = f'/home/yingyan.li/repo/WoTE/dataset/extra_data/planning_vb/formatted_pdm_score_{num_traj_anchor}.npy'
-    cluster_file_path = f'/home/yingyan.li/repo/WoTE/dataset/extra_data/planning_vb/trajectory_anchors_{num_traj_anchor}.npy'
+    sim_reward_dict_path: str = f'/mnt/sfs_turbo/gaoxuan_gac/WoTE/extra_data/planning_vb/formatted_pdm_score_{num_traj_anchor}.npy'
+    cluster_file_path = f'/mnt/sfs_turbo/gaoxuan_gac/WoTE/extra_data/planning_vb/trajectory_anchors_{num_traj_anchor}.npy'
     num_plan_queries: int = 32
 
     # map loss

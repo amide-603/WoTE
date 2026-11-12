@@ -69,13 +69,16 @@ class AbstractAgent(torch.nn.Module, ABC):
         for builder in self.get_feature_builders():
             features.update(builder.compute_features(agent_input))
 
-        # add batch dimension
-        features = {k: v.unsqueeze(0) for k, v in features.items()}
+        # 特征由构建器在 CPU 上生成；将其移到模型所在设备，支持 CPU、GPU 和 NPU 推理。
+        # 无参数的 agent 保持原有的 CPU 行为。
+        device = next(self.parameters(), torch.empty(0)).device
+        features = {k: v.unsqueeze(0).to(device) for k, v in features.items()}
 
         # forward pass
         with torch.no_grad():
             predictions = self.forward(features)
-            poses = predictions["trajectory"].squeeze(0).numpy()
+            # NumPy 只能直接读取 CPU 张量，因此先将设备上的轨迹移回 CPU。
+            poses = predictions["trajectory"].squeeze(0).cpu().numpy()
 
         # extract trajectory
         return Trajectory(poses)

@@ -116,11 +116,43 @@ def main(cfg: DictConfig) -> None:
     logger.info("Num validation samples: %d", len(val_data))
 
     logger.info("Building Trainer")
-    trainer_params = cfg.trainer.params
+    # 复制 Hydra 配置，便于仅在 NPU 分支替换为 Lightning 所需的 Python 对象。
+    trainer_params = dict(cfg.trainer.params)
+    if trainer_params.get("accelerator") == "npu":
+        from navsim.planning.training.npu_accelerator import NPUAccelerator, NPUDDPStrategy
+        from pytorch_lightning.strategies import SingleDeviceStrategy
+
+        if trainer_params.get("precision") not in (32, "32", "32-true"):
+            raise ValueError("NPU training currently supports only 32-true precision")
+        if trainer_params.get("num_nodes", 1) != 1:
+            raise ValueError("NPU training currently supports only one node")
+        devices = NPUAccelerator.parse_devices(trainer_params.get("devices", "auto"))
+        strategy = trainer_params.get("strategy", "auto")
+        if strategy not in ("auto", "ddp"):
+            raise ValueError("NPU training supports only auto or ddp strategy")
+        # 此运行时的 Transformer 融合推理路径会回退到 CPU；关闭以便验证阶段使用 NPU 算子。
+        torch.backends.mha.set_fastpath_enabled(False)
+        trainer_params["accelerator"] = NPUAccelerator()
+        trainer_params["strategy"] = (
+            SingleDeviceStrategy(device=torch.device("npu:0"))
+            if devices == 1
+            else NPUDDPStrategy(process_group_backend="hccl", find_unused_parameters=True)
+        )
     # trainer_params['strategy'] = "ddp_find_unused_parameters_true" #TODO
+    callbacks = list(agent.get_training_callbacks())
+    if cfg.checkpoint_every_n_epochs is not None:
+        from pytorch_lightning.callbacks import ModelCheckpoint
+        callbacks.append(ModelCheckpoint(
+            dirpath=str(Path(cfg.output_dir) / "checkpoints"),
+            filename="epoch={epoch:02d}-step={step}",
+            auto_insert_metric_name=False,
+            every_n_epochs=int(cfg.checkpoint_every_n_epochs),
+            save_top_k=-1,
+            save_on_train_epoch_end=True,
+        ))
     trainer = pl.Trainer(
                 **trainer_params, 
-                callbacks=agent.get_training_callbacks(),
+                callbacks=callbacks,
                 )
 
     logger.info("Starting Training")
@@ -129,7 +161,7 @@ def main(cfg: DictConfig) -> None:
         model=lightning_module,
         train_dataloaders=train_dataloader,
         val_dataloaders=val_dataloader,
-        # ckpt_path=ckpt_path,
+        ckpt_path=cfg.resume_from_checkpoint,
     )
 
 if __name__ == "__main__":

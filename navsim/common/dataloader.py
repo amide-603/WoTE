@@ -22,10 +22,12 @@ def filter_scenes(data_path: Path, scene_filter: SceneFilter) -> Dict[str, List[
     # filter logs
     log_files = list(data_path.iterdir())
     if scene_filter.log_names is not None:
+        # 训练划分包含大量日志；转为集合后按名称查找，避免逐个日志反复线性扫描列表。
+        log_names = set(scene_filter.log_names)
         log_files = [
             log_file
             for log_file in log_files
-            if log_file.name.replace(".pkl", "") in scene_filter.log_names
+            if log_file.name.replace(".pkl", "") in log_names
         ]
 
     if scene_filter.tokens is not None:

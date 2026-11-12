@@ -35,8 +35,9 @@ class AgentLightningModule(pl.LightningModule):
             if 'acc' in loss_key:
                 continue
             total_loss = total_loss + loss_value
+        self.log(f"{logging_prefix}/total_loss", total_loss, on_step=False, on_epoch=True, sync_dist=True)
         return total_loss
-    
+
     def training_step(
         self,
         batch: Tuple[Dict[str, Tensor], Dict[str, Tensor]],
@@ -53,8 +54,5 @@ class AgentLightningModule(pl.LightningModule):
 
     def configure_optimizers(self):
         return self.agent.get_optimizers()
-    
-    def backward(self, loss):
-        # print('set detect anomaly')
-        # torch.autograd.set_detect_anomaly(True)
-        loss.backward()
+
+    # 不再重写 backward：Lightning 新版会传入额外参数，使用框架默认实现可兼容训练调用。

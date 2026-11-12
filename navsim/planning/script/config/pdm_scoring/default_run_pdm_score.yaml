@@ -12,3 +12,5 @@ defaults:
   - agent: constant_velocity_agent
 
 metric_cache_path: ${oc.env:NAVSIM_EXP_ROOT}/metric_cache # path to metric cache
+save_model_results: true # Save WoTE's full model output per scene as NPZ
+inference_devices: [] # Optional logical NPU devices, e.g. ["npu:0", "npu:1"]

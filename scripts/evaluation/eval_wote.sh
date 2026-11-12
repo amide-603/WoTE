@@ -1,18 +1,25 @@
-# Define
-export PYTHONPATH=/home/yingyan.li/repo/WoTE/
-export NUPLAN_MAP_VERSION="nuplan-maps-v1.0"
-export NUPLAN_MAPS_ROOT="/home/yingyan.li/repo/WoTE/dataset/maps"
-export NAVSIM_EXP_ROOT="/home/yingyan.li/repo/WoTE/exp"
-export NAVSIM_DEVKIT_ROOT="/home/yingyan.li/repo/WoTE/"
-export OPENSCENE_DATA_ROOT="/home/yingyan.li/repo/WoTE/dataset"
+#!/usr/bin/env bash
+set -euo pipefail
 
-CONFIG_NAME=default
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$repo_root"
+export NAVSIM_DEVKIT_ROOT="$repo_root"
+export PYTHONPATH="$repo_root${PYTHONPATH:+:$PYTHONPATH}"
+: "${OPENSCENE_DATA_ROOT:?Set OPENSCENE_DATA_ROOT to the NAVSIM dataset directory}"
+: "${NUPLAN_MAPS_ROOT:?Set NUPLAN_MAPS_ROOT to the maps directory}"
+: "${NAVSIM_EXP_ROOT:?Set NAVSIM_EXP_ROOT to the experiment directory}"
+: "${WOTE_CHECKPOINT_PATH:?Set WOTE_CHECKPOINT_PATH to the checkpoint to evaluate}"
+export NUPLAN_MAP_VERSION="${NUPLAN_MAP_VERSION:-nuplan-maps-v1.0}"
 
-# evaluation, change the checkpoint_path
+cache_override=()
+if [[ -n "${WOTE_METRIC_CACHE_ROOT:-}" ]]; then
+  cache_override+=("metric_cache_path=$WOTE_METRIC_CACHE_ROOT/navtest")
+fi
+
 python ./navsim/planning/script/run_pdm_score.py \
-agent=WoTE_agent \
-'agent.checkpoint_path="/home/yingyan.li/repo/WoTE/exp/WoTE/default/lightning_logs/version_0/checkpoints/epoch=29-step=19950.ckpt"' \
-agent.config._target_=navsim.agents.WoTE.configs.${CONFIG_NAME}.WoTEConfig \
-experiment_name=eval/WoTE/${CONFIG_NAME}/ \
-split=test \
-scene_filter=navtest \
+  agent=WoTE_agent \
+  "agent.checkpoint_path='$WOTE_CHECKPOINT_PATH'" \
+  experiment_name=eval/WoTE/default \
+  split=test scene_filter=navtest \
+  "${cache_override[@]}" \
+  "$@"

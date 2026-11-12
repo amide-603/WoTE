@@ -3,7 +3,7 @@ import math
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.cuda.amp.autocast_mode import autocast
+# 原 CUDA autocast 导入未被使用，已移除，避免在昇腾代码中保留无用的 CUDA 依赖。
 
 def linear_relu_ln(embed_dims, in_loops, out_loops, input_dims=None):
     if input_dims is None:
