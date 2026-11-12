@@ -7,7 +7,7 @@ import numpy as np
 import torch
 
 
-def score_candidates_with_reference(cache, proposals, sampling, simulator, scorer):
+def score_candidates_with_reference(cache, proposals, sampling, simulator, scorer, include_total=False):
     """批量仿真，并重现标准评测中每条候选与参考轨迹的两两评分。"""
     from navsim.common.dataclasses import Trajectory
     from navsim.evaluate.pdm_score import get_trajectory_as_array, transform_trajectory
@@ -45,10 +45,17 @@ def score_candidates_with_reference(cache, proposals, sampling, simulator, score
     progress[valid] = raw[1:][valid] / denominator[valid]
     progress[~valid & (multiply[1:] == 0)] = 0
     # 输出顺序与现有五个预测头一致。
-    return np.stack([multi[MultiMetricIndex.NO_COLLISION, 1:],
-                     multi[MultiMetricIndex.DRIVABLE_AREA, 1:], progress,
-                     weighted[WeightedMetricIndex.TTC, 1:],
-                     weighted[WeightedMetricIndex.COMFORTABLE, 1:]]).astype(np.float32)
+    values = np.stack([multi[MultiMetricIndex.NO_COLLISION, 1:],
+                       multi[MultiMetricIndex.DRIVABLE_AREA, 1:], progress,
+                       weighted[WeightedMetricIndex.TTC, 1:],
+                       weighted[WeightedMetricIndex.COMFORTABLE, 1:]]).astype(np.float32)
+    if not include_total:
+        return values
+    # 与 PDMScorer._aggregate_scores 相同，使用上方逐候选参考轨迹归一化结果。
+    weighted[WeightedMetricIndex.PROGRESS, 1:] = progress
+    weights = scorer._config.weighted_metrics_array
+    totals = multiply[1:] * (weighted[:, 1:] * weights[:, None]).sum(axis=0) / weights.sum()
+    return values, totals.astype(np.float32)
 
 
 class RefinedSupervision:
@@ -81,7 +88,7 @@ class RefinedSupervision:
         self._simulator = PDMSimulator(self._sampling)
         self._scorer = PDMScorer(self._sampling, PDMScorerConfig(progress_distance_threshold=5.0))
 
-    def score(self, trajectories, tokens):
+    def score(self, trajectories, tokens, include_total=False):
         # 仿真及标签不可微；仅将 detach 的轨迹复制到 CPU。
         if self._metric_loader is None:
             self._initialize_scorer()
@@ -93,20 +100,33 @@ class RefinedSupervision:
         keys = ("no_at_fault_collisions", "drivable_area_compliance", "ego_progress",
                 "time_to_collision_within_bound", "comfort")
         batch_scores = []
+        batch_totals = []
         for token, proposals in zip(tokens, trajectories_cpu):
             if token not in self._metric_loader.metric_cache_paths:
                 raise RuntimeError(f"场景 {token} 缺少 metric cache，无法计算在线 PDM 标签。")
             try:
                 cache = self._metric_loader.get_from_token(token)
                 # 训练标签采用与单轨迹评测相同的参考轨迹评分口径。
-                values = score_candidates_with_reference(cache, proposals, self._sampling, self._simulator, self._scorer)
+                if include_total:
+                    values, totals = score_candidates_with_reference(
+                        cache, proposals, self._sampling, self._simulator, self._scorer, include_total=True
+                    )
+                else:
+                    values = score_candidates_with_reference(cache, proposals, self._sampling, self._simulator, self._scorer)
             except Exception as exc:
                 raise RuntimeError(f"场景 {token} 的在线 PDM 评分失败。") from exc
             if values.shape != (len(keys), proposals.shape[0]) or not np.isfinite(values).all():
                 raise ValueError(f"场景 {token} 的在线 PDM 分数形状或数值无效。")
             batch_scores.append(values)
+            if include_total:
+                if totals.shape != (proposals.shape[0],) or not np.isfinite(totals).all():
+                    raise ValueError(f"场景 {token} 的在线 PDM 总分形状或数值无效。")
+                batch_totals.append(totals)
         # 保持原损失函数期望的 [batch, 时间切片, 指标, 候选] 形状。
-        return torch.as_tensor(np.stack(batch_scores), device=trajectories.device).unsqueeze(1)
+        scores = torch.as_tensor(np.stack(batch_scores), device=trajectories.device).unsqueeze(1)
+        if include_total:
+            return scores, torch.as_tensor(np.stack(batch_totals), device=trajectories.device)
+        return scores
 
     def future_bev_target(self, targets, trajectories):
         # 旧缓存已覆盖背景像素，必须明确提示重建，不能静默沿用旧框。

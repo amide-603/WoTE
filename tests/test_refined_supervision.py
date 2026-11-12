@@ -133,6 +133,102 @@ class RefinedSupervisionTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "缺少 metric cache"):
             helper.score(poses[:1], ["missing"])
 
+    def test_ranking_uses_online_refined_scores_and_updates_offsets(self):
+        from unittest.mock import patch
+        import navsim.agents.WoTE.refined_supervision as supervision
+        from navsim.agents.WoTE.WoTE_agent import WoTEAgent
+
+        config = WoTEConfig()
+        config.ranking_loss_weight = 1.0
+        config.ranking_top_k = 3
+        config.use_agent_loss = False
+        config.use_map_loss = False
+        config.reward_weights = [1.0, 0.0, 0.0, 0.0]
+        helper = RefinedSupervision(config, [3])
+        helper._metric_loader = Mock()
+        helper._metric_loader.metric_cache_paths = {"scene": "scene"}
+        helper._metric_loader.get_from_token.return_value = "scene"
+        offset = torch.zeros(1, 3, 8, 3, requires_grad=True)
+        anchors = torch.zeros(3, 8, 3)
+        anchors[:, 0, 0] = torch.tensor([0.1, 0.2, 0.3])
+        refined = anchors.unsqueeze(0) + offset
+        predictions = {
+            "refined_trajectories": refined,
+            "trajectory_anchors": anchors,
+            "trajectory_offset_rewards": torch.full((1, 3), 1 / 3),
+            "im_rewards": (-refined[:, :, 0, 0]).softmax(-1),
+            "sim_rewards": torch.full((1, 5, 3), 0.8),
+        }
+        calls = []
+        def fake_score(cache, proposals, *_args, include_total=False):
+            calls.append(proposals.copy())
+            self.assertTrue(include_total)
+            return np.ones((5, 3), dtype=np.float32), proposals[:, 0, 0]
+
+        agent = WoTEAgent.__new__(WoTEAgent)
+        torch.nn.Module.__init__(agent)
+        agent.config = config
+        agent._refined_supervision = helper
+        with patch.object(supervision, "score_candidates_with_reference", side_effect=fake_score), \
+             patch("navsim.agents.WoTE.WoTE_loss.compute_traj_offset_loss", return_value=torch.tensor(0.)), \
+             patch("navsim.agents.WoTE.WoTE_loss.compute_im_reward_loss", return_value=torch.tensor(0.)), \
+             patch("navsim.agents.WoTE.WoTE_loss.compute_sim_reward_loss", return_value=torch.tensor(0.)):
+            losses = agent.compute_loss({}, {"scene_token": ["scene"]}, predictions)
+            self.assertEqual(len(calls), 1)
+            np.testing.assert_allclose(calls[0], refined.detach().numpy()[0])
+            self.assertIn("ranking_loss", losses)
+            losses["ranking_loss"].backward()
+        self.assertIsNotNone(offset.grad)
+        self.assertTrue(torch.isfinite(offset.grad).all())
+        self.assertGreater(offset.grad.abs().sum().item(), 0)
+
+    def test_online_ranking_scores_preserve_batch_order_and_are_detached(self):
+        from unittest.mock import patch
+        import navsim.agents.WoTE.refined_supervision as supervision
+        helper = RefinedSupervision(WoTEConfig(), [3])
+        helper._metric_loader = Mock()
+        helper._metric_loader.metric_cache_paths = {"a": "a", "b": "b"}
+        helper._metric_loader.get_from_token.side_effect = lambda token: token
+        poses = torch.arange(4.0).reshape(2, 2, 1, 1).expand(-1, -1, 8, 3).clone().requires_grad_()
+        def fake_score(cache, proposals, *_args, include_total=False):
+            self.assertTrue(include_total)
+            values = np.tile(proposals[:, 0, 0], (5, 1))
+            return values, proposals[:, 0, 0] + (10 if cache == "b" else 0)
+        with patch.object(supervision, "score_candidates_with_reference", side_effect=fake_score) as score:
+            metrics, totals = helper.score(poses, ["a", "b"], include_total=True)
+        self.assertEqual(score.call_count, 2)
+        self.assertTrue(torch.equal(totals, torch.tensor([[0., 1.], [12., 13.]])))
+        self.assertFalse(totals.requires_grad)
+        self.assertFalse(metrics.requires_grad)
+
+    def test_reference_scoring_totals_use_pairwise_progress_and_all_metrics(self):
+        from unittest.mock import patch
+        import navsim.evaluate.pdm_score as pdm
+        from navsim.agents.WoTE.refined_supervision import score_candidates_with_reference
+        from navsim.planning.simulation.planner.pdm_planner.scoring.pdm_scorer import PDMScorerConfig
+
+        cache = SimpleNamespace(ego_state=SimpleNamespace(time_point=0), trajectory=None,
+                                observation=None, centerline=None, route_lane_ids=None, drivable_area_map=None)
+        simulator = Mock()
+        scorer = Mock()
+        scorer._config = PDMScorerConfig(progress_distance_threshold=5.0)
+        scorer._multi_metrics = np.array([[1., 1., 0.5], [1., 1., 1.], [1., 1., 1.]])
+        scorer._weighted_metrics = np.array([[0., 0., 0.], [1., 0.8, 0.4], [1., 0.5, 0.2]])
+        scorer._progress_raw = np.array([10., 5., 16.])
+        scorer._ego_coords = np.zeros((3, 2, 5, 2))
+        scorer._ego_areas = np.zeros((3, 2, 3), dtype=bool)
+        with patch.object(pdm, "transform_trajectory", side_effect=lambda traj, _: traj), \
+             patch.object(pdm, "get_trajectory_as_array", return_value=np.zeros((2, 11))):
+            values, totals = score_candidates_with_reference(
+                cache, np.zeros((2, 8, 3)), SimpleNamespace(interval_length=0.1),
+                simulator, scorer, include_total=True,
+            )
+        np.testing.assert_allclose(values[2], [0.5, 0.8])
+        np.testing.assert_allclose(totals, [(5 * 0.5 + 5 * 0.8 + 2 * 0.5) / 12,
+                                           0.5 * (5 * 0.8 + 5 * 0.4 + 2 * 0.2) / 12])
+        simulator.simulate_proposals.assert_called_once()
+        scorer.score_proposals.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

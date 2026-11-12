@@ -168,3 +168,8 @@ class WoTEConfig:
     offset_im_reward_weight = 0.1
     im_loss_weight = 1.0
     metric_loss_weight = 1.0
+
+    # Optional pairwise supervision over the trajectories preferred at inference.
+    ranking_loss_weight: float = 0.0
+    ranking_temperature: float = 0.5
+    ranking_top_k: int = 8

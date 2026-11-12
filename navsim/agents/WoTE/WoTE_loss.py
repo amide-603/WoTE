@@ -40,6 +40,13 @@ def compute_wote_loss(
     loss_dict['im_reward_loss'] = im_reward_loss
     loss_dict['sim_reward_loss'] = sim_reward_loss
 
+    if config.ranking_loss_weight > 0:
+        loss_dict['ranking_loss'] = config.ranking_loss_weight * compute_pairwise_ranking_loss(
+            imitation_rewards, sim_rewards, targets['ranking_target_score'],
+            getattr(config, 'reward_weights', [0.1, 0.5, 0.5, 1.0]),
+            config.ranking_top_k, config.ranking_temperature,
+        )
+
     use_agent_loss = config.use_agent_loss if hasattr(config, "use_agent_loss") else True
     if use_agent_loss:
         agent_cls_loss, agent_box_loss = compute_wote_agent_loss(
@@ -72,6 +79,32 @@ def compute_wote_loss(
         loss_dict['fut_map_loss'] = fut_map_loss * config.fut_bev_semantic_weight
 
     return loss_dict
+
+
+def compute_pairwise_ranking_loss(im_rewards, sim_rewards, target_scores, weights, top_k=8, temperature=0.5):
+    """Rank predicted top-k using online refined-trajectory PDM scores."""
+    if temperature <= 0:
+        raise ValueError('ranking temperature must be positive')
+    if top_k < 2 or top_k > im_rewards.shape[-1]:
+        raise ValueError('ranking top_k must be between 2 and the number of trajectories')
+    # Match the score used by forward_test, while keeping log inputs finite.
+    nc, dac, ep, ttc, comfort = sim_rewards.unbind(dim=1)
+    eps = 1e-6
+    scores = (weights[0] * im_rewards.clamp_min(eps).log()
+              + weights[1] * nc.clamp_min(eps).log()
+              + weights[2] * dac.clamp_min(eps).log()
+              + weights[3] * (5 * ttc + 2 * comfort + 5 * ep).clamp_min(eps).log())
+    indices = scores.topk(top_k, dim=-1).indices
+    selected_scores = scores.gather(1, indices)
+    selected_targets = target_scores.gather(1, indices)
+    pairs = torch.triu_indices(top_k, top_k, offset=1, device=scores.device)
+    score_diff = selected_scores[:, pairs[0]] - selected_scores[:, pairs[1]]
+    target_diff = selected_targets[:, pairs[0]] - selected_targets[:, pairs[1]]
+    valid = target_diff != 0
+    pair_loss = F.softplus(-target_diff.sign() * score_diff / temperature)
+    # Avoid a device-to-host synchronization and preserve a zero gradient when
+    # every target pair is tied.
+    return (pair_loss * valid).sum() / valid.sum().clamp_min(1)
 
 def compute_traj_offset_loss(
     predictions: Dict[str, torch.Tensor],
