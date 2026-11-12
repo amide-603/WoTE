@@ -7,55 +7,8 @@ import numpy as np
 import torch
 
 
-def score_candidates_with_reference(cache, proposals, sampling, simulator, scorer, include_total=False):
-    """批量仿真，并重现标准评测中每条候选与参考轨迹的两两评分。"""
-    from navsim.common.dataclasses import Trajectory
-    from navsim.evaluate.pdm_score import get_trajectory_as_array, transform_trajectory
-    from navsim.planning.simulation.planner.pdm_planner.utils.pdm_enums import (
-        BBCoordsIndex, EgoAreaIndex, MultiMetricIndex, WeightedMetricIndex,
-    )
-
-    # 所有候选共享一次仿真，但每条候选单独与参考轨迹归一化进度。
-    initial = cache.ego_state
-    reference = get_trajectory_as_array(cache.trajectory, sampling, initial.time_point)
-    candidates = [get_trajectory_as_array(transform_trajectory(Trajectory(traj), initial),
-                                          sampling, initial.time_point) for traj in proposals]
-    states = simulator.simulate_proposals(np.stack([reference, *candidates]), initial)
-    scorer.score_proposals(states, cache.observation, cache.centerline,
-                           cache.route_lane_ids, cache.drivable_area_map)
-    multi = scorer._multi_metrics.copy()
-    weighted = scorer._weighted_metrics.copy()
-
-    # 标准评测目前沿候选维计算方向指标；重现其双轨迹行为，保持旧结果可比。
-    centers = scorer._ego_coords[:, :, BBCoordsIndex.CENTER]
-    oncoming = np.zeros(centers.shape[:2], dtype=np.float64)
-    oncoming[:, 1:] = np.linalg.norm(centers[:, 1:] - centers[:, :-1], axis=-1)
-    oncoming[~scorer._ego_areas[:, :, EgoAreaIndex.ONCOMING_TRAFFIC]] = 0
-    horizon = int(scorer._config.driving_direction_horizon / sampling.interval_length)
-    distances = np.r_[oncoming[0].max(),
-                      (oncoming[1:] + (oncoming[0] if horizon >= 1 else 0)).max(axis=-1)]
-    direction = np.where(distances < scorer._config.driving_direction_compliance_threshold, 1.0,
-                         np.where(distances < scorer._config.driving_direction_violation_threshold, 0.5, 0.0))
-    multi[MultiMetricIndex.DRIVING_DIRECTION] = direction
-    multiply = multi.prod(axis=0)
-    raw = scorer._progress_raw * multiply
-    denominator = np.maximum(raw[0], raw[1:])
-    progress = np.ones(len(proposals), dtype=np.float64)
-    valid = denominator > scorer._config.progress_distance_threshold
-    progress[valid] = raw[1:][valid] / denominator[valid]
-    progress[~valid & (multiply[1:] == 0)] = 0
-    # 输出顺序与现有五个预测头一致。
-    values = np.stack([multi[MultiMetricIndex.NO_COLLISION, 1:],
-                       multi[MultiMetricIndex.DRIVABLE_AREA, 1:], progress,
-                       weighted[WeightedMetricIndex.TTC, 1:],
-                       weighted[WeightedMetricIndex.COMFORTABLE, 1:]]).astype(np.float32)
-    if not include_total:
-        return values
-    # 与 PDMScorer._aggregate_scores 相同，使用上方逐候选参考轨迹归一化结果。
-    weighted[WeightedMetricIndex.PROGRESS, 1:] = progress
-    weights = scorer._config.weighted_metrics_array
-    totals = multiply[1:] * (weighted[:, 1:] * weights[:, None]).sum(axis=0) / weights.sum()
-    return values, totals.astype(np.float32)
+# 评分核心独立于 NPU，供 CPU 工作进程复用，原调用入口保持兼容。
+from navsim.agents.WoTE.pdm_scoring import score_candidates_with_reference
 
 
 class RefinedSupervision:
@@ -68,6 +21,19 @@ class RefinedSupervision:
         self._sampling = None
         self._simulator = None
         self._scorer = None
+        # 使用测速选出的配置；环境变量可覆盖配置，设为 0 时回退串行评分。
+        self._score_workers = int(os.environ.get("WOTE_SCORE_WORKERS", getattr(config, "score_workers", 16)))
+        self._score_fast = os.environ.get(
+            "WOTE_SCORE_FAST", "1" if getattr(config, "score_fast_trajectory", True) else "0"
+        ) == "1"
+        self._score_cache_size = int(os.environ.get(
+            "WOTE_SCORE_CACHE_SIZE", getattr(config, "score_cache_size", 128)
+        ))
+        if self._score_workers < 0:
+            raise ValueError("WOTE_SCORE_WORKERS 不能为负数。")
+        if self._score_cache_size < 0:
+            raise ValueError("WOTE_SCORE_CACHE_SIZE 不能为负数。")
+        self._score_pool = None
 
     def _initialize_scorer(self):
         # 延迟加载大体积仿真依赖，推理阶段无需 metric cache。
@@ -99,22 +65,39 @@ class RefinedSupervision:
             raise ValueError("refine 轨迹包含非有限值，无法在线评分。")
         keys = ("no_at_fault_collisions", "drivable_area_compliance", "ego_progress",
                 "time_to_collision_within_bound", "comfort")
-        batch_scores = []
-        batch_totals = []
-        for token, proposals in zip(tokens, trajectories_cpu):
+        # 在派发前检查所有场景，避免部分评分成功后才发现缺少缓存。
+        for token in tokens:
             if token not in self._metric_loader.metric_cache_paths:
                 raise RuntimeError(f"场景 {token} 缺少 metric cache，无法计算在线 PDM 标签。")
-            try:
-                cache = self._metric_loader.get_from_token(token)
-                # 训练标签采用与单轨迹评测相同的参考轨迹评分口径。
-                if include_total:
-                    values, totals = score_candidates_with_reference(
-                        cache, proposals, self._sampling, self._simulator, self._scorer, include_total=True
-                    )
-                else:
-                    values = score_candidates_with_reference(cache, proposals, self._sampling, self._simulator, self._scorer)
-            except Exception as exc:
-                raise RuntimeError(f"场景 {token} 的在线 PDM 评分失败。") from exc
+        if self._score_workers:
+            # 每张 NPU 的场景并发评分，CPU 子进程常驻并独立维护评分器。
+            if self._score_pool is None:
+                from navsim.agents.WoTE.score_pool import SceneScorePool
+                self._score_pool = SceneScorePool(self._score_workers, fast=self._score_fast,
+                                                  cache_size=self._score_cache_size)
+            paths = [self._metric_loader.metric_cache_paths[token] for token in tokens]
+            if include_total:
+                batch_results = self._score_pool.score(tokens, paths, trajectories_cpu, include_total=True)
+            else:
+                batch_results = self._score_pool.score(tokens, paths, trajectories_cpu)
+        else:
+            batch_results = []
+            for token, proposals in zip(tokens, trajectories_cpu):
+                try:
+                    cache = self._metric_loader.get_from_token(token)
+                    # 训练标签采用与单轨迹评测相同的参考轨迹评分口径。
+                    if include_total:
+                        values = score_candidates_with_reference(cache, proposals, self._sampling, self._simulator, self._scorer, include_total=True)
+                    else:
+                        values = score_candidates_with_reference(cache, proposals, self._sampling, self._simulator, self._scorer)
+                except Exception as exc:
+                    raise RuntimeError(f"场景 {token} 的在线 PDM 评分失败。") from exc
+                batch_results.append(values)
+        if len(batch_results) != len(tokens):
+            raise ValueError("在线 PDM 评分结果数量与场景数量不一致。")
+        batch_scores, batch_totals = [], []
+        for token, proposals, result in zip(tokens, trajectories_cpu, batch_results):
+            values, totals = result if include_total else (result, None)
             if values.shape != (len(keys), proposals.shape[0]) or not np.isfinite(values).all():
                 raise ValueError(f"场景 {token} 的在线 PDM 分数形状或数值无效。")
             batch_scores.append(values)

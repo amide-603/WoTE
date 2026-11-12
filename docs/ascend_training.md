@@ -23,6 +23,13 @@ cd /home/gaoxuan_gac/code/WoTE
 `agent.config.metric_cache_path`。缺少场景缓存时训练会报错。损失函数中的 SciPy 匈牙利匹配也在
 CPU 上运行。
 
+在线评分默认每张 NPU 使用 16 个独立 CPU 评分进程，启用批量轨迹转换，并在每个进程内
+最多缓存 128 个场景。该配置按本机 mini 数据的八卡、每卡 batch 16 测速选出；其他机器或
+批大小应先核对 CPU 与内存资源。可通过 `agent.config.score_workers`、
+`agent.config.score_fast_trajectory`、`agent.config.score_cache_size` 调整，环境变量
+`WOTE_SCORE_WORKERS`、`WOTE_SCORE_FAST`、`WOTE_SCORE_CACHE_SIZE` 优先；将进程数设为 0
+可回退原串行评分。场景缓存只保留不随模型变化的信息，每次仍对当前 refine 候选在线评分。
+
 未来 BEV 标签使用 `WoTE_target_refined_v1` 缓存中的无自车框背景，在训练时按采样的 refine
 轨迹动态绘制自车框。旧 `WoTE_target.gz` 不能用作新标签；使用缓存时需重新生成目标缓存。
 非强制重建模式下，已有的传感器特征缓存会复用。缓存模式发现旧目标时会提示重建。

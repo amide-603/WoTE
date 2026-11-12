@@ -14,6 +14,9 @@ scores. Both prediction and target correspond to the current forward pass's
 refined trajectories. The five metric targets and total scores come from the
 same simulation; the targets are detached, while gradients flow through the
 reward prediction network to the trajectory offsets. Tied targets are ignored.
+This also applies when CPU scoring workers and fast trajectory conversion are
+enabled; each worker returns the metric targets and total from the same scoring
+call, and results are restored to the input scene order.
 
 The total uses the `e6ab3b0` reference-trajectory scoring procedure: each
 candidate's progress is normalized against the reference, and all

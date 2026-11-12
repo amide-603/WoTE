@@ -116,7 +116,10 @@ class RefinedSupervisionTest(unittest.TestCase):
         # 用可控评分替身验证每个样本的候选、token 和五个指标的排列。
         import navsim.agents.WoTE.refined_supervision as supervision
         from unittest.mock import patch
-        helper = RefinedSupervision(WoTEConfig(), [3])
+        # 该测试独立验证串行标签包装，避免依赖实际 CPU 子进程。
+        config = WoTEConfig()
+        config.score_workers = 0
+        helper = RefinedSupervision(config, [3])
         helper._metric_loader = Mock()
         helper._metric_loader.metric_cache_paths = {"a": "a", "b": "b"}
         helper._metric_loader.get_from_token.side_effect = lambda token: token
@@ -140,6 +143,7 @@ class RefinedSupervisionTest(unittest.TestCase):
 
         config = WoTEConfig()
         config.ranking_loss_weight = 1.0
+        config.score_workers = 0
         config.ranking_top_k = 3
         config.use_agent_loss = False
         config.use_map_loss = False
@@ -185,7 +189,9 @@ class RefinedSupervisionTest(unittest.TestCase):
     def test_online_ranking_scores_preserve_batch_order_and_are_detached(self):
         from unittest.mock import patch
         import navsim.agents.WoTE.refined_supervision as supervision
-        helper = RefinedSupervision(WoTEConfig(), [3])
+        config = WoTEConfig()
+        config.score_workers = 0
+        helper = RefinedSupervision(config, [3])
         helper._metric_loader = Mock()
         helper._metric_loader.metric_cache_paths = {"a": "a", "b": "b"}
         helper._metric_loader.get_from_token.side_effect = lambda token: token
@@ -200,6 +206,24 @@ class RefinedSupervisionTest(unittest.TestCase):
         self.assertTrue(torch.equal(totals, torch.tensor([[0., 1.], [12., 13.]])))
         self.assertFalse(totals.requires_grad)
         self.assertFalse(metrics.requires_grad)
+
+    def test_parallel_ranking_scores_keep_scene_and_candidate_order(self):
+        config = WoTEConfig()
+        config.score_workers = 2
+        helper = RefinedSupervision(config, [3])
+        helper._metric_loader = Mock()
+        helper._metric_loader.metric_cache_paths = {"a": "path-a", "b": "path-b"}
+        helper._score_pool = Mock()
+        helper._score_pool.score.return_value = [
+            (np.full((5, 2), 1, dtype=np.float32), np.array([0.2, 0.8], dtype=np.float32)),
+            (np.full((5, 2), 2, dtype=np.float32), np.array([0.7, 0.1], dtype=np.float32)),
+        ]
+        poses = torch.zeros(2, 2, 8, 3, requires_grad=True)
+        metrics, totals = helper.score(poses, ["a", "b"], include_total=True)
+        self.assertTrue(torch.equal(totals, torch.tensor([[0.2, 0.8], [0.7, 0.1]])))
+        self.assertTrue(torch.equal(metrics[:, 0, 0, 0], torch.tensor([1., 2.])))
+        self.assertFalse(totals.requires_grad)
+        self.assertTrue(helper._score_pool.score.call_args.kwargs['include_total'])
 
     def test_reference_scoring_totals_use_pairwise_progress_and_all_metrics(self):
         from unittest.mock import patch
