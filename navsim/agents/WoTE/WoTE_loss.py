@@ -41,11 +41,15 @@ def compute_wote_loss(
     loss_dict['sim_reward_loss'] = sim_reward_loss
 
     if config.ranking_loss_weight > 0:
-        loss_dict['ranking_loss'] = config.ranking_loss_weight * compute_pairwise_ranking_loss(
-            imitation_rewards, sim_rewards, targets['ranking_target_score'],
+        ranking_components = compute_pairwise_ranking_loss(
+            imitation_rewards, sim_rewards, targets['sim_reward'][:, -1],
             getattr(config, 'reward_weights', [0.1, 0.5, 0.5, 1.0]),
             config.ranking_top_k, config.ranking_temperature,
         )
+        weighted_components = ranking_components * (config.ranking_loss_weight / 5)
+        loss_dict['ranking_loss'] = weighted_components.sum()
+        for name, value in zip(('nc', 'dac', 'ep', 'ttc', 'comfort'), weighted_components):
+            loss_dict[f'ranking_component_{name}'] = value.detach()
 
     use_agent_loss = config.use_agent_loss if hasattr(config, "use_agent_loss") else True
     if use_agent_loss:
@@ -82,7 +86,7 @@ def compute_wote_loss(
 
 
 def compute_pairwise_ranking_loss(im_rewards, sim_rewards, target_scores, weights, top_k=8, temperature=0.5):
-    """Rank predicted top-k using online refined-trajectory PDM scores."""
+    """Return five per-metric losses for the inference-selected top-k trajectories."""
     if temperature <= 0:
         raise ValueError('ranking temperature must be positive')
     if top_k < 2 or top_k > im_rewards.shape[-1]:
@@ -95,16 +99,19 @@ def compute_pairwise_ranking_loss(im_rewards, sim_rewards, target_scores, weight
               + weights[2] * dac.clamp_min(eps).log()
               + weights[3] * (5 * ttc + 2 * comfort + 5 * ep).clamp_min(eps).log())
     indices = scores.topk(top_k, dim=-1).indices
-    selected_scores = scores.gather(1, indices)
-    selected_targets = target_scores.gather(1, indices)
+    if sim_rewards.ndim != 3 or sim_rewards.shape[1] != 5 or target_scores.shape != sim_rewards.shape:
+        raise ValueError('predicted and target simulator scores must have shape [batch, 5, trajectories]')
+    selected_indices = indices.unsqueeze(1).expand(-1, 5, -1)
+    selected_scores = sim_rewards.gather(2, selected_indices)
+    selected_targets = target_scores.detach().gather(2, selected_indices)
     pairs = torch.triu_indices(top_k, top_k, offset=1, device=scores.device)
-    score_diff = selected_scores[:, pairs[0]] - selected_scores[:, pairs[1]]
-    target_diff = selected_targets[:, pairs[0]] - selected_targets[:, pairs[1]]
+    score_diff = selected_scores[:, :, pairs[0]] - selected_scores[:, :, pairs[1]]
+    target_diff = selected_targets[:, :, pairs[0]] - selected_targets[:, :, pairs[1]]
     valid = target_diff != 0
     pair_loss = F.softplus(-target_diff.sign() * score_diff / temperature)
     # Avoid a device-to-host synchronization and preserve a zero gradient when
     # every target pair is tied.
-    return (pair_loss * valid).sum() / valid.sum().clamp_min(1)
+    return (pair_loss * valid).sum(dim=(0, 2)) / valid.sum(dim=(0, 2)).clamp_min(1)
 
 def compute_traj_offset_loss(
     predictions: Dict[str, torch.Tensor],

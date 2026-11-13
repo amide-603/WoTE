@@ -132,13 +132,7 @@ class WoTEAgent(AbstractAgent):
         targets = dict(targets)
         if "scene_token" not in targets:
             raise RuntimeError("训练样本缺少 scene_token，无法定位在线评分所需的 metric cache。")
-        if self.config.ranking_loss_weight > 0:
-            # 两类标签来自同一次 refine 轨迹仿真，候选顺序完全一致。
-            targets["sim_reward"], targets["ranking_target_score"] = self._refined_supervision.score(
-                refined, targets["scene_token"], include_total=True
-            )
-        else:
-            targets["sim_reward"] = self._refined_supervision.score(refined, targets["scene_token"])
+        targets["sim_reward"] = self._refined_supervision.score(refined, targets["scene_token"])
         if self.config.use_map_loss:
             targets["fut_bev_semantic_map"] = self._refined_supervision.future_bev_target(targets, refined)
         return compute_wote_loss(targets, predictions, self.config)

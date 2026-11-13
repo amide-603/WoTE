@@ -32,7 +32,7 @@ class AgentLightningModule(pl.LightningModule):
         total_loss = 0.0
         for loss_key, loss_value in loss_dict.items():
             self.log(f"{logging_prefix}/{loss_key}", loss_value, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
-            if 'acc' in loss_key:
+            if 'acc' in loss_key or loss_key.startswith('ranking_component_'):
                 continue
             total_loss = total_loss + loss_value
         self.log(f"{logging_prefix}/total_loss", total_loss, on_step=False, on_epoch=True, sync_dist=True)

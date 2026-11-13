@@ -161,13 +161,13 @@ class RefinedSupervisionTest(unittest.TestCase):
             "trajectory_anchors": anchors,
             "trajectory_offset_rewards": torch.full((1, 3), 1 / 3),
             "im_rewards": (-refined[:, :, 0, 0]).softmax(-1),
-            "sim_rewards": torch.full((1, 5, 3), 0.8),
+            "sim_rewards": refined[:, None, :, 0, 0].expand(-1, 5, -1).sigmoid(),
         }
         calls = []
         def fake_score(cache, proposals, *_args, include_total=False):
             calls.append(proposals.copy())
-            self.assertTrue(include_total)
-            return np.ones((5, 3), dtype=np.float32), proposals[:, 0, 0]
+            self.assertFalse(include_total)
+            return np.tile(-proposals[:, 0, 0], (5, 1)).astype(np.float32)
 
         agent = WoTEAgent.__new__(WoTEAgent)
         torch.nn.Module.__init__(agent)
